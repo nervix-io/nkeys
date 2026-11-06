@@ -347,18 +347,20 @@ impl UnverifiedRecord {
         Ok(Self { bytes, checksum })
     }
 
-    fn verify(self) -> Result<Zeroizing<Vec<u8>>> {
+    fn verify(&self) -> Result<()> {
         if !valid_checksum(&self.bytes, self.checksum) {
             return Err(crate::error::Error::from_kind(
                 crate::error::ErrorKind::ChecksumFailure,
             ));
         }
-        Ok(self.bytes)
+        Ok(())
     }
 }
 
 fn decode_raw(raw: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    UnverifiedRecord::decode(raw)?.verify()
+    let record = UnverifiedRecord::decode(raw)?;
+    record.verify()?;
+    Ok(record.bytes)
 }
 
 /// Returns the prefix byte and the underlying public key bytes
@@ -413,6 +415,9 @@ fn decode_seed_record(
 
     let source_bytes = source.as_bytes();
     let record = UnverifiedRecord::decode(source_bytes)?;
+    if expected.is_none() {
+        record.verify()?;
+    }
     let raw = &record.bytes;
 
     let b1 = raw[0] & 248;
@@ -436,7 +441,10 @@ fn decode_seed_record(
             ));
         }
     }
-    let raw = record.verify()?;
+    if expected.is_some() {
+        record.verify()?;
+    }
+    let raw = &record.bytes;
     let mut seed = Zeroizing::new([0u8; 32]);
     seed.copy_from_slice(&raw[2..]);
 
