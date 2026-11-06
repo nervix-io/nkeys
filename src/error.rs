@@ -8,12 +8,13 @@
 #![allow(unused_macros)]
 
 use core::fmt;
-use signatory::signature;
-
 use std::{
     error::Error as StdError,
     string::{String, ToString},
 };
+
+#[cfg(feature = "signing")]
+use signatory::signature;
 
 /// Provides an error type specific to the nkeys library
 #[derive(Debug)]
@@ -21,6 +22,7 @@ pub struct Error {
     kind: ErrorKind,
 
     description: Option<String>,
+    source: Option<data_encoding::DecodeError>,
 }
 
 /// Provides context as to how a particular nkeys error might have occurred
@@ -84,11 +86,21 @@ impl fmt::Display for ErrorKind {
 }
 
 impl Error {
+    /// Construct a typed refusal without allocating or formatting input values.
+    pub fn from_kind(kind: ErrorKind) -> Self {
+        Self {
+            kind,
+            description: None,
+            source: None,
+        }
+    }
+
     /// Creates a new nkeys error wrapper
     pub fn new(kind: ErrorKind, description: Option<&str>) -> Self {
         Error {
             kind,
             description: description.map(|desc| desc.to_string()),
+            source: None,
         }
     }
 
@@ -101,6 +113,7 @@ impl Error {
 }
 
 /// Creates an nkeys error derived from an error that came from the `signatory` crate
+#[cfg(feature = "signing")]
 impl From<signature::Error> for Error {
     fn from(source: signature::Error) -> Error {
         err!(SignatureError, &format!("Signature error: {}", source))
@@ -110,11 +123,22 @@ impl From<signature::Error> for Error {
 /// Creates an nkeys error derived from a decoding failure in the `data_encoding` crate
 impl From<data_encoding::DecodeError> for Error {
     fn from(source: data_encoding::DecodeError) -> Error {
-        err!(CodecFailure, "Data encoding failure: {}", source)
+        Error {
+            kind: ErrorKind::CodecFailure,
+            description: None,
+            source: Some(source),
+        }
     }
 }
 
 impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match &self.source {
+            Some(source) => Some(source),
+            None => None,
+        }
+    }
+
     fn description(&self) -> &str {
         if let Some(ref desc) = self.description {
             desc

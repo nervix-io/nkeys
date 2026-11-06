@@ -1,5 +1,7 @@
-use super::error::{Error, ErrorKind};
-use super::Result;
+use super::{
+    error::{Error, ErrorKind},
+    Result,
+};
 
 const CRC_TABLE: [u16; 256] = [
     0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7, 0x8108, 0x9129, 0xa14a, 0xb16b,
@@ -63,7 +65,7 @@ mod tests {
 
     #[test]
     fn e2e() {
-        let mut raw_data = rand::random::<[u8; 32]>();
+        let mut raw_data = [7; 32];
         let data_crc = crc16(&raw_data);
 
         let mut data = raw_data.to_vec();

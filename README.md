@@ -25,3 +25,14 @@ The following is a list of available prefixes and their keypair types:
 * **X** - Curve Key (X25519)
 
 For seeds, the first encoded prefix is **S**, and the second character will be the type for the public key, e.g. `SU` is a seed for a user key pair, `SA` is a seed for an account key pair.
+
+## Format-only consumers
+
+This maintained fork exposes `encode`, `encode_seed`, `decode_seed`, and `from_public_key`
+without the default `signing` feature. Format-only consumers bring no signing, hashing,
+key-generation or random backend into their dependency graph. Decoded seeds and intermediate
+records clear their bytes on drop; public-key encoding allocates only its returned string.
+The default signing and optional XKey APIs remain qualified alongside this surface.
+
+The Nervix consumer pins an immutable revision and signs through its own cryptography owner.
+Maintenance and qualification are tracked by [NATS Nervix 08](https://app.clickup.com/t/86bczq20q).

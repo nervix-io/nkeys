@@ -1,15 +1,16 @@
-use crate::{
-    decode_raw, decode_seed, encode, encode_prefix, encode_seed, err, KeyPairType,
-    PREFIX_BYTE_CURVE, PREFIX_BYTE_PRIVATE,
-};
+use std::fmt::{self, Debug};
 
-use super::Result;
 use crypto_box::{
     aead::{Aead, AeadCore},
     Nonce, SalsaBox,
 };
 use ed25519::signature::digest::typenum::Unsigned;
-use std::fmt::{self, Debug};
+
+use super::Result;
+use crate::{
+    decode_raw, decode_seed, encode, encode_prefix, encode_seed, err, KeyPairType,
+    PREFIX_BYTE_CURVE, PREFIX_BYTE_PRIVATE,
+};
 
 const XKEY_VERSION_V1: &[u8] = b"xkv1";
 
@@ -97,7 +98,7 @@ impl XKey {
             ));
         }
 
-        let secret = SecretKey::from_bytes(seed);
+        let secret = SecretKey::from_bytes(*seed);
         Ok(Self {
             public: secret.public_key(),
             secret: Some(secret),

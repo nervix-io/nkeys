@@ -46,11 +46,15 @@
 
 #![allow(dead_code)]
 
+#[cfg(feature = "signing")]
 use std::fmt::{self, Debug};
 
-use crc::{extract_crc, push_crc, valid_checksum};
+use crc::{extract_crc, valid_checksum};
+#[cfg(feature = "signing")]
 use ed25519_dalek::{SecretKey, Signer, SigningKey, Verifier, VerifyingKey};
+#[cfg(feature = "signing")]
 use rand::prelude::*;
+use zeroize::Zeroizing;
 
 #[cfg(feature = "xkeys")]
 mod xkeys;
@@ -88,6 +92,7 @@ type Result<T> = std::result::Result<T, crate::error::Error>;
 
 /// The main interface used for reading and writing _nkey-encoded_ key pairs, including
 /// seeds and public keys.
+#[cfg(feature = "signing")]
 #[derive(Clone)]
 pub struct KeyPair {
     kp_type: KeyPairType,
@@ -96,6 +101,7 @@ pub struct KeyPair {
     pk: VerifyingKey,
 }
 
+#[cfg(feature = "signing")]
 impl Debug for KeyPair {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "KeyPair ({:?})", self.kp_type)
@@ -160,6 +166,7 @@ impl From<u8> for KeyPairType {
     }
 }
 
+#[cfg(feature = "signing")]
 impl KeyPair {
     /// Creates a new key pair of the given type.
     ///
@@ -317,7 +324,7 @@ impl KeyPair {
         Ok(KeyPair {
             kp_type: KeyPairType::from(ty),
             pk: signing_key.verifying_key(),
-            sk: Some(seed),
+            sk: Some(*seed),
             signing_key: Some(signing_key),
         })
     }
@@ -328,16 +335,30 @@ impl KeyPair {
     }
 }
 
-fn decode_raw(raw: &[u8]) -> Result<Vec<u8>> {
-    let mut b32_decoded = data_encoding::BASE32_NOPAD.decode(raw)?;
+struct UnverifiedRecord {
+    bytes: Zeroizing<Vec<u8>>,
+    checksum: u16,
+}
 
-    let checksum = extract_crc(&mut b32_decoded)?;
-    let v_checksum = valid_checksum(&b32_decoded, checksum);
-    if !v_checksum {
-        Err(err!(ChecksumFailure, "Checksum mismatch"))
-    } else {
-        Ok(b32_decoded)
+impl UnverifiedRecord {
+    fn decode(raw: &[u8]) -> Result<Self> {
+        let mut bytes = Zeroizing::new(data_encoding::BASE32_NOPAD.decode(raw)?);
+        let checksum = extract_crc(&mut bytes)?;
+        Ok(Self { bytes, checksum })
     }
+
+    fn verify(self) -> Result<Zeroizing<Vec<u8>>> {
+        if !valid_checksum(&self.bytes, self.checksum) {
+            return Err(crate::error::Error::from_kind(
+                crate::error::ErrorKind::ChecksumFailure,
+            ));
+        }
+        Ok(self.bytes)
+    }
+}
+
+fn decode_raw(raw: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    UnverifiedRecord::decode(raw)?.verify()
 }
 
 /// Returns the prefix byte and the underlying public key bytes
@@ -369,32 +390,60 @@ pub fn from_public_key(source: &str) -> Result<(u8, [u8; 32])> {
 
 /// Attempts to decode the provided base32 encoded string into a valid prefix byte and the private key seed bytes.
 /// NOTE: This is considered an advanced use case, it's generally recommended to stick with [`KeyPair::from_seed`] instead.
-pub fn decode_seed(source: &str) -> Result<(u8, [u8; 32])> {
+pub fn decode_seed(source: &str) -> Result<(u8, Zeroizing<[u8; 32]>)> {
+    decode_seed_record(source, None)
+}
+
+/// Decode a seed of the required identity kind. Prefix validation precedes the
+/// checksum, so a wrong identity never reaches the selected signing backend.
+pub fn decode_seed_for(source: &str, kind: KeyPairType) -> Result<Zeroizing<[u8; 32]>> {
+    let (_, seed) = decode_seed_record(source, Some(&kind))?;
+    Ok(seed)
+}
+
+fn decode_seed_record(
+    source: &str,
+    expected: Option<&KeyPairType>,
+) -> Result<(u8, Zeroizing<[u8; 32]>)> {
     if source.len() != ENCODED_SEED_LENGTH {
-        let l = source.len();
-        return Err(err!(InvalidKeyLength, "Bad seed length: {}", l));
+        return Err(crate::error::Error::from_kind(
+            crate::error::ErrorKind::InvalidKeyLength,
+        ));
     }
 
     let source_bytes = source.as_bytes();
-    let raw = decode_raw(source_bytes)?;
+    let record = UnverifiedRecord::decode(source_bytes)?;
+    let raw = &record.bytes;
 
     let b1 = raw[0] & 248;
     if b1 != PREFIX_BYTE_SEED {
-        return Err(err!(
-            InvalidPrefix,
-            "Incorrect byte prefix: {}",
-            source.chars().next().unwrap()
+        return Err(crate::error::Error::from_kind(
+            crate::error::ErrorKind::InvalidPrefix,
         ));
     }
 
     let b2 = (raw[0] & 7) << 5 | ((raw[1] & 248) >> 3);
 
-    let mut seed = [0u8; 32];
+    if raw[1] & 7 != 0 || !valid_public_key_prefix(b2) {
+        return Err(crate::error::Error::from_kind(
+            crate::error::ErrorKind::InvalidPrefix,
+        ));
+    }
+    if let Some(expected) = expected {
+        if b2 != get_prefix_byte(expected) {
+            return Err(crate::error::Error::from_kind(
+                crate::error::ErrorKind::InvalidPrefix,
+            ));
+        }
+    }
+    let raw = record.verify()?;
+    let mut seed = Zeroizing::new([0u8; 32]);
     seed.copy_from_slice(&raw[2..]);
 
     Ok((b2, seed))
 }
 
+#[cfg(feature = "signing")]
 fn generate_seed_rand() -> [u8; 32] {
     let mut rng = rand::thread_rng();
     rng.gen::<[u8; 32]>()
@@ -414,10 +463,11 @@ fn get_prefix_byte(kp_type: &KeyPairType) -> u8 {
 }
 
 fn valid_public_key_prefix(prefix: u8) -> bool {
-    PUBLIC_KEY_PREFIXES.to_vec().contains(&prefix)
+    PUBLIC_KEY_PREFIXES.contains(&prefix)
 }
 
-fn encode_seed(ty: &KeyPairType, seed: &[u8]) -> String {
+/// Encode a 32-byte private seed with its key kind and transcription checksum.
+pub fn encode_seed(ty: &KeyPairType, seed: &[u8; 32]) -> String {
     let prefix_byte = get_prefix_byte(ty);
 
     let b1 = PREFIX_BYTE_SEED | prefix_byte >> 5;
@@ -426,21 +476,26 @@ fn encode_seed(ty: &KeyPairType, seed: &[u8]) -> String {
     encode_prefix(&[b1, b2], seed)
 }
 
-fn encode(ty: &KeyPairType, key: &[u8]) -> String {
+/// Encode a 32-byte public key with its key kind and transcription checksum.
+pub fn encode(ty: &KeyPairType, key: &[u8; 32]) -> String {
     let prefix_byte = get_prefix_byte(ty);
     encode_prefix(&[prefix_byte], key)
 }
 
-fn encode_prefix(prefix: &[u8], key: &[u8]) -> String {
-    let mut raw = Vec::with_capacity(prefix.len() + key.len() + 2);
-    raw.extend_from_slice(prefix);
-    raw.extend_from_slice(key);
-    push_crc(&mut raw);
-
-    data_encoding::BASE32_NOPAD.encode(&raw[..])
+fn encode_prefix<const N: usize>(prefix: &[u8; N], key: &[u8; 32]) -> String {
+    // NKey seeds have two prefix bytes; public and private keys have one. Keep the
+    // intermediate record on the stack and clear it, including when it holds a seed.
+    let mut raw = Zeroizing::new([0u8; 36]);
+    let payload_end = N + key.len();
+    let record_end = payload_end + 2;
+    raw[..N].copy_from_slice(prefix);
+    raw[N..payload_end].copy_from_slice(key);
+    let checksum = crc::crc16(&raw[..payload_end]).to_le_bytes();
+    raw[payload_end..record_end].copy_from_slice(&checksum);
+    data_encoding::BASE32_NOPAD.encode(&raw[..record_end])
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "signing"))]
 mod tests {
     use super::*;
     use crate::error::ErrorKind;
@@ -448,18 +503,18 @@ mod tests {
     #[test]
     fn validate_decode_seed() {
         let input_bytes = generate_seed_rand();
-        let seed = encode_seed(&KeyPairType::User, input_bytes.as_slice());
+        let seed = encode_seed(&KeyPairType::User, &input_bytes);
 
         let (prefix, decoded_bytes) = decode_seed(&seed).unwrap();
 
         assert_eq!(prefix, PREFIX_BYTE_USER);
-        assert_eq!(decoded_bytes, input_bytes);
+        assert_eq!(*decoded_bytes, input_bytes);
     }
 
     #[test]
     fn validate_from_public_key() {
         let input_bytes = generate_seed_rand();
-        let public_key = encode(&KeyPairType::User, input_bytes.as_slice());
+        let public_key = encode(&KeyPairType::User, &input_bytes);
 
         let (prefix, decoded_bytes) = from_public_key(&public_key).unwrap();
 
@@ -635,3 +690,27 @@ mod tests {
 
 mod crc;
 pub mod error;
+
+#[cfg(test)]
+mod codec_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn user_seed_reserved_prefix_bits_are_rejected() {
+        let encoded = encode_prefix(&[0x95, 0x01], &[7; 32]);
+        assert!(decode_seed(&encoded).is_err());
+    }
+}
+
+#[cfg(test)]
+mod codec_allocation_tests {
+    #[test]
+    fn public_encoder_allocates_only_its_result() {
+        let info = allocation_counter::measure(|| {
+            let encoded = super::encode(&super::KeyPairType::User, &[7; 32]);
+            assert_eq!(encoded.len(), 56);
+            std::hint::black_box(encoded);
+        });
+        assert_eq!(info.count_total, 1);
+    }
+}
